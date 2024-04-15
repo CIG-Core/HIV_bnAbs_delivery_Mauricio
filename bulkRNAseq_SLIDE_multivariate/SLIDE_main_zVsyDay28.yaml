@@ -1,0 +1,18 @@
+---
+x_path: /ix/cigcore/proj/mauricio/data/topTpmDay28s2Vs3.csv
+y_path: /ix/cigcore/proj/mauricio/data/s3Vs2Day28.csv
+out_path: /ix/cigcore/proj/mauricio/result/SLIDE_tpm/SLIDE02212024/Day28_2Vs3/delta0.02/spec0.25/0.02_2_out/
+delta:
+  - 0.02
+lambda:
+  - 2.0
+spec: 0.25
+y_factor: true
+y_levels: 
+  - 0
+  - 1
+eval_type: auc
+SLIDE_iter: 1000
+SLIDE_top_feats: 20
+sampleCV_K: 5
+do_interacts: TRUE
