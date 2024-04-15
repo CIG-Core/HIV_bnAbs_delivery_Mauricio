@@ -1,0 +1,313 @@
+---
+title: "Differential Expression Analysis - Juvenile samples"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library('TxDb.Mmulatta.UCSC.rheMac3.refGene')
+library('biomaRt')
+library('sleuth')
+library('openxlsx')
+library('ggplot2')
+library('ggfortify')
+library('matrixStats')
+library('pheatmap')
+## library('WebGestaltR')
+## library('stringr')
+library('orthogene')
+library('ReactomePA')
+library('clusterProfiler')
+library('AnnotationDbi')
+library('enrichplot')
+library("org.Hs.eg.db")
+library('RColorBrewer')
+
+source( "/ix/cigcore/utils/code/sleuth.func.R")
+source("/ix/cigcore/utils/code/de.heatmap.R")
+source("/ix/cigcore/utils/code/save.heatmap.R")
+
+# Set paths
+proj_path <- "/ix/cigcore/proj/mauricio"
+data_path <- file.path(proj_path, "data")
+result_path <- file.path(proj_path, "result")
+experiment <- "11-16-2023-DE_Analysis_Juvenile" # results with pvalue of 0.01
+## experiment <- "06-05-2023-DE_Analysis_Juvenile" # results with pvalue of 0.01
+experiment_path <- file.path(result_path, experiment)
+dir.create(experiment_path, recursive=TRUE)
+```
+
+```{r sleuth-setup, echo=FALSE, warning=FALSE, message=FALSE}
+# Inputs for sleuth.func
+metadataPath <- file.path(data_path, "juvenile_samples.csv")
+skipLines <- 0
+sampleCol <- "Sample"
+
+full_model <- "~Group"
+factorCol <- "Group"
+
+dataDirs <- file.path(data_path, "2021_fastq")
+outPath <- experiment_path
+
+# mart <- useMart("ensembl", dataset="mmulatta_gene_ensembl") 
+# ttg <- getBM(attributes=c("ensembl_gene_id", "ensembl_transcript_id", "external_gene_name"), mart = mart) 
+# colnames(ttg) <- c("ensembl_gene", "target_id", "gene_name")
+aggCol <- "ensembl_gene"
+ttg <- read.csv(file.path(data_path, "ttg_rhesus.csv"))
+
+pval <- 0.1
+
+# pval <- 0.05
+```
+
+```{r run_sleuth.func_2, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+# Run sleuth.func with reference level==2
+refLevel <- "Zero"
+sleuth_results <- sleuth.func(metaData = metadataPath, skipLines=skipLines, sampleCol=sampleCol,
+                                     factors = factorCol, refLevel=refLevel, dataDir = dataDirs,
+                                     mappingDF = ttg, aggCol = aggCol, pvalCutoff = pval, outPath = outPath,
+                                     drop_dupGenes = FALSE)
+## save(sleuth_results, file.path(,"sleuth_results.RData"))
+
+```
+
+```{r sleuth-output-overall, echo=FALSE, message=FALSE, warning=FALSE}
+# the following quantities are the same regardless of the reference level used in the sleuth analysis
+norm_counts <- sleuth_results$normal_counts
+sampleInfo <- sleuth_results$sampleDF
+
+numSamples <- dim(sampleInfo)[1]
+numTranscripts <- dim(norm_counts)[1]
+
+tpmMat <- sleuth_results$TPM
+```
+
+# Sample Metadata
+
+```{r metadata, echo=FALSE}
+knitr::kable(sampleInfo)
+```
+
+Significant DE transcript cut-off (adj. p-value): `r pval`
+
+# Differential Expression Results
+
+Number of samples: `r numSamples`
+
+Total number of transcripts analyzed: `r numTranscripts`
+
+Zero = Sample collected at Day 0
+
+Early = Sample collected at Day 2
+
+Late = Sample collected after Day 21 
+
+## Reference Level = Group Day Zero
+
+```{r Group2_summary, echo=FALSE}
+summaryTable <- sleuth_results$summaryDF[,-(2:3)]
+knitr::kable(summaryTable)
+```
+
+### Group Zero vs. Late
+
+#### PCA
+
+```{r pca_2-1, echo=FALSE}
+sleuth_results[["Late_vs_Zero_pca"]]
+```
+
+#### Volcano Plot
+
+```{r volcano_2-1, echo=FALSE, warning=FALSE, message=FALSE}
+sleuth_results[["Late_vs_Zero_vPlot"]]
+```
+
+### Group Zero vs. Early
+
+#### PCA
+
+```{r pca_2-3_pca, echo=FALSE}
+sleuth_results[["Early_vs_Zero_pca"]]
+```
+
+#### Volcano Plot
+
+```{r volcano_2-3, echo=FALSE, warning=FALSE, message=FALSE}
+sleuth_results[["Early_vs_Zero_vPlot"]]
+```
+
+# Pathway Analysis
+
+```{r run_ORA, include=FALSE, echo=FALSE, warning=FALSE, message=FALSE}
+# Pathway analysis using clusterprofiler 
+cp_path <- file.path(experiment_path, "pathway_analysis_CP-ORA")
+dir.create(cp_path, recursive=TRUE)
+
+resultsOut <- list(sleuth_results)
+ORA <- list()
+plots_list <- list()
+mapDET <- list()
+
+for(r1 in resultsOut){
+  sigDET_UpOrDn <- grep("\\w*(Up|Dn)\\b", names(r1), value=TRUE)
+  for(g1 in sigDET_UpOrDn){
+    ## genes <- r1[[g1]]$gene_name
+    if(nrow(r1[[g1]]) > 0){
+      ortho_df <- orthogene::convert_orthologs(r1[[g1]], gene_input="ensembl_gene", 
+                                           gene_output = "columns", input_species="mmulatta",
+                                           output_species = "hsapiens", non121_strategy = "keep_both_species")
+      gene_list <- ortho_df$ortholog_gene
+      ## projectName <- paste0(g1,"_",a1)
+      mapDET[[g1]] <- ortho_df
+      
+      # Get gene names and convert to entrez id
+      entrez_genes <- bitr(gene_list, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+    
+      # Reactome pathway over-representation analysis
+      reactome <- enrichPathway(gene = entrez_genes$ENTREZID, organism = "human", qvalueCutoff=0.05, readable=TRUE)
+      ORA[[paste0(g1, "_Reactome")]] <- reactome
+      
+      # KEGG pathway over-representation analysis
+      kegg <- enrichKEGG(gene = entrez_genes$ENTREZID, organism = "hsa",  qvalueCutoff=0.05, 
+                         use_internal_data = FALSE)
+      if(!is.null(dim(kegg))){
+        kegg2 <- setReadable(kegg, OrgDb = "org.Hs.eg.db", keyType="ENTREZID")
+        kegg2@result$Description <- gsub(pattern = " - Homo sapiens (human)", replacement = "", 
+                                    kegg2@result$Description, fixed = T) 
+        ORA[[paste0(g1, "_KEGG")]]<- kegg2
+      }
+    }
+  }
+}
+
+for(a1 in names(ORA)){
+  reacORkegg <- ORA[[a1]]
+  if(nrow(ORA[[a1]]) !=0){
+    # Create directories for each result
+    ## ORA_path <- file.path(cp_path, a1)
+    ## dir.create(ORA_path, recursive=TRUE)
+
+    write.csv(as.data.frame(reacORkegg), file.path(cp_path, paste0(a1, ".csv")))
+    
+    # Plot enrichment result - dotplot
+    plots_list[[a1]] <- plot(dotplot(reacORkegg, showCategory = 20))
+    pdf(file.path(cp_path, paste0(a1, "_dotplot.pdf")))
+    plot(dotplot(reacORkegg, showCategory = 20))
+    dev.off()
+    ## plots_list[[a1]] <- fit
+  }
+}
+```
+
+### Reference Level: Group Zero
+
+#### Zero vs. Late- Up-regulated (KEGG)
+```{r enrichment_plot_2_vs_1-KEGG-Up, echo=FALSE, warning=FALSE, message=FALSE}
+plots_list$sigDET_Late_vs_Zero_Up_KEGG
+```
+
+#### Zero vs. Late- Up-regulated (Reactome)
+```{r enrichment_plot_2_vs_1-Reactome-Up, echo=FALSE, warning=FALSE, message=FALSE}
+plots_list$sigDET_Late_vs_Zero_Up_Reactome
+```
+
+#### Zero vs. Late- Down-regulated (KEGG)
+```{r enrichment_plot_2_vs_1-KEGG-Down, echo=FALSE, warning=FALSE, message=FALSE}
+plots_list$sigDET_Late_vs_Zero_Dn_KEGG
+```
+
+#### Zero vs. Late- Down-regulated (Reactome)
+```{r enrichment_plot_2_vs_1-Reactome-Down, echo=FALSE, warning=FALSE, message=FALSE}
+plots_list$sigDET_Late_vs_Zero_Dn_Reactome
+```
+
+#### Zero vs. Early- Up-regulated (KEGG)
+```{r enrichment_plot_2_vs_3-KEGG-Up, echo=FALSE, warning=FALSE, message=FALSE}
+plots_list$sigDET_Early_vs_Zero_Up_KEGG
+```
+
+#### Zero vs. Early- Up-regulated (Reactome)
+```{r enrichment_plot_2_vs_3-Reactome-Up, echo=FALSE, warning=FALSE, message=FALSE}
+plots_list$sigDET_Early_vs_Zero_Up_Reactome
+```
+
+#### Zero vs. Early- Down-regulated (KEGG)
+```{r enrichment_plot_2_vs_3-KEGG-Down, echo=FALSE, warning=FALSE, message=FALSE}
+plots_list$sigDET_Early_vs_Zero_Dn_KEGG
+```
+
+#### Zero vs. Early- Down-regulated (Reactome)
+```{r enrichment_plot_2_vs_3-Reactome-Down, echo=FALSE, warning=FALSE, message=FALSE}
+plots_list$sigDET_Early_vs_Zero_Dn_Reactome
+```
+
+
+# Heatmaps
+
+```{r heatmap-cellcycle, include=FALSE, echo=FALSE, warning=FALSE, message=FALSE}
+
+## Get animal ids for numbering
+animalInfo <- read.csv(metadataPath, row.names = 1)
+animalInfo <- with(animalInfo, animalInfo[order(Group, Animal_ID),])
+animalInfo$names <- paste(animalInfo$Group, animalInfo$Animal_ID, sep = "_")
+animalInfo <- with(animalInfo, animalInfo[order(Group, decreasing = TRUE),])
+
+animalInfo_late <- animalInfo[animalInfo$Group != "Early", ]
+animalInfo_early <- animalInfo[animalInfo$Group != "Late", ]
+
+colAnnot <-data.frame(row.names=animalInfo$names, Group=factor(animalInfo$Group, levels = c("Zero", "Early", "Late")))
+colAnnot_late <- colAnnot[colAnnot$Group != "Early", ]
+colAnnot_early <- colAnnot[colAnnot$Group != "Late", ]
+## tpmMat <- sleuth_results$TPM
+tpm_late <- tpmMat[, animalInfo_late$Sample]
+colnames(tpm_late) <- animalInfo_late$names
+
+tpm_early <- tpmMat[, animalInfo_early$Sample]
+colnames(tpm_early) <- animalInfo_early$names
+
+selectGenes <- list()
+
+## read sigDET 
+sigDET_late <- sleuth_results$sigDET_Late_vs_Zero
+sigDET_late <- sigDET_late[sigDET_late$gene_name != "" ,]
+sigDET_early <- sleuth_results$sigDET_Early_vs_Zero
+sigDET_early <- sigDET_early[sigDET_early$gene_name != "" ,]
+
+## Get Top 40 genes
+selectGenes[["late"]] <- sigDET_late$gene_name[1:40]
+selectGenes[["early"]] <- sigDET_early$gene_name
+
+hMaps <- list()
+selectSigDETData <- list()
+for(s1 in names(selectGenes)){
+  sigDET <- get(paste0("sigDET_", s1))
+  subSigDET1 <- sigDET[sigDET$gene_name %in% selectGenes[[s1]], ]
+  selectSigDET <- sigDET[sigDET$gene_name %in% selectGenes[[s1]], c("gene_name", "target_id")]
+  
+  tpmIn <- paste0("tpm_", s1)
+  ## colorPal = colorRampPalette(c("red", "coral", "lightyellow", "lightblue","royalblue"))(100)
+  hMap1 <- de.heatmap(tpmMat=get(tpmIn), gene_list=selectSigDET, clusterCols = FALSE, 
+                      colAnnot=colAnnot, savePath=file.path(experiment_path, paste0(s1, "_heatmp.pdf")))
+  save.heatmap(x = hMap1$hMap, filename = file.path(experiment_path, paste0(s1, "_heatmp.pdf")))
+  hMaps[[s1]] <- hMap1$hMap
+  selectSigDETData[[s1]] <- merge(subSigDET1[ , 1:7], hMap1$zMat, by.x = "gene_name", 
+                                  by.y = 0, sort = FALSE)
+}
+
+write.xlsx(selectSigDETData, file = file.path(experiment_path, "selected_signficant_DET.xlsx"))
+```
+
+### Zero vs. Late top 40 DE genes
+
+```{r heatmap-cellcycle-genes, echo=FALSE, warning=FALSE, message=FALSE}
+hMaps$late
+```
+
+### Zero vs. Early top DE genes
+
+```{r heatmap-apoptosis, echo=FALSE, warning=FALSE, message=FALSE}
+hMaps$early
+```
